@@ -21,6 +21,23 @@ from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
 
 
+def load_model_from_config(config, ckpt, verbose=False):
+    print(f"Loading model from {ckpt}")
+    pl_sd = torch.load(ckpt, map_location="cpu")
+    sd = pl_sd["state_dict"]
+    config.model.params.ckpt_path = ckpt
+    model = instantiate_from_config(config.model)
+    m, u = model.load_state_dict(sd, strict=False)
+    if len(m) > 0 and verbose:
+        print("missing keys:")
+        print(m)
+    if len(u) > 0 and verbose:
+        print("unexpected keys:")
+        print(u)
+
+    model.cuda()
+    return model
+
 def get_parser(**parser_kwargs):
     def str2bool(v):
         if isinstance(v, bool):
@@ -120,6 +137,32 @@ def get_parser(**parser_kwargs):
         default=True,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
+
+    parser.add_argument("--actual_resume",
+        type=str,
+        required=True,
+        help="Path to model to actually resume from",
+    )
+
+    parser.add_argument("--data_root",
+        type=str,
+        required=True,
+        help="Path to directory with training images",
+    )
+
+    parser.add_argument("--placeholder_tokens",
+        type=str,
+        nargs="+",
+        default=["*"],
+        help="Placeholder token which will be used to denote the concept in future prompts",
+    )
+
+    parser.add_argument("--init_word",
+        type=str,
+        help="Word to use as source for initial token embedding",
+    )
+
+
     return parser
 
 
@@ -531,8 +574,17 @@ if __name__ == "__main__":
         trainer_opt = argparse.Namespace(**trainer_config)
         lightning_config.trainer = trainer_config
 
+
+        config.model.params.personalization_config.params.placeholder_tokens = opt.placeholder_tokens
+
+        if opt.init_word:
+            config.model.params.personalization_config.params.initializer_words[0] = opt.init_word
+
         # model
-        model = instantiate_from_config(config.model)
+        if opt.actual_resume:
+            model = load_model_from_config(config, opt.actual_resume)
+        else:
+            model = instantiate_from_config(config.model)
 
         # trainer and callbacks
         trainer_kwargs = dict()
@@ -660,6 +712,8 @@ if __name__ == "__main__":
         trainer.logdir = logdir  ###
 
         # data
+        config.data.params.train.params.data_root = opt.data_root
+        config.data.params.validation.params.data_root = opt.data_root
         data = instantiate_from_config(config.data)
         # NOTE according to https://pytorch-lightning.readthedocs.io/en/latest/datamodules.html
         # calling these ourselves should not be necessary but it is.
